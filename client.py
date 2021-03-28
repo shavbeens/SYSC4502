@@ -8,15 +8,19 @@ import time
 from socket import *
 import sys
 import string
+import struct
 
 # Get address and port number from command arguments
-address = sys.argv[1]
+multicastAddress = sys.argv[1]
 port = sys.argv[2]
 
 # create cleintSocket with Arguments passed from parameters
 clientSocket = socket(AF_INET, SOCK_DGRAM)
-clientSocket.settimeout(5)
+clientSocket.settimeout(12)
 
+# Set TTL for messages to 1
+ttl = struct.pack('b', 1)
+clientSocket.setsockopt(IPPROTO_IP, IP_MULTICAST_TTL, ttl)
 
 # The functions for days.txt file reading command
 def days():
@@ -65,7 +69,7 @@ def delete():
 
 # The function for quiting the application
 def quitapp():
-    return "6"
+    sys.exit()
 
 
 # This acts like a switch function for whatever input the user gives regarding what they want to do
@@ -95,12 +99,13 @@ while True:
 
     # Send the message that has was formatted for the respective commands (0 to 6), then print the message to console
     sentTime = time.time()
-    clientSocket.sendto(sendingMessage.encode(), (address, int(port)))
+    clientSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
     print("Message sent with the following: ", sendingMessage)
 
     # if the last command we sent was to quit, then exit from the application
     if sendingMessage == '6':
-        sys.exit()
+        print("got here")
+        # sys.exit()
 
     # Otherwise, we can keep going ahead with our application
     try:
@@ -110,7 +115,7 @@ while True:
 
         # calculate round trip time from sent and received time captures, print the rtt to console
         rtt = str(receivedTime - sentTime)
-        print("Got a response; it took {}Seconds".format(rtt))
+        print("Got a response from %s; it took %s Seconds" % (serverAddress, rtt))
         # received message is printed so the user can see if the server responded appropriately to what they requested
         print("Received Message is: ", receivedMessage.decode(), end="\n\n")
 
