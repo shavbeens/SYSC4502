@@ -247,32 +247,48 @@ def runThread(threadName, sockQueue, serverSocket, socketLock, reservationsLock,
 
         if(threadName == "ServerCommunicationThread"):
             if(SERVER_STATE == LEADING):
+                print("This server is the leader, PID is: %d" % IDnumber)
                 while SERVER_STATE == LEADING:
                     serverQLock.acquire(1)
                     if(not serverQ.empty()):
-                        print("got a heartbeat")
+                        # print("got a heartbeat")
                         follower = serverQ.get()
+                        serverQLock.release()
                         sendingMessage = "$,%s,%s" % (follower, LEADING)
                         serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
                         
                     else:
                         serverQLock.release()
-                        print("waiting for heartbeat")
+                        # print("waiting for heartbeat")
                         time.sleep(1)
 
             
 
             elif(SERVER_STATE == FOLLOWING):
+                print("This server is now a follower, PID is: %d" % (IDnumber))
                 while SERVER_STATE == FOLLOWING:
                     sendingMessage = "$,%s,%s" % (IDnumber, FOLLOWING)
                     serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
+                    serverQLock.acquire(1)
+                    if(not serverQ.empty()):
+                        # print("Got a heartbeat response")
+                        follower = serverQ.get()
+                        serverQLock.release()
+                        if(follower != str(IDnumber)):
+                            print("Something went wrong catastrophically!")
+                        sendingMessage = "$,%s,%s" % (follower, FOLLOWING)
+                        serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
+                    
+                    else:
+                        serverQLock.release()
+                        # print("Waiting for the heartbeat response")
+                        time.sleep(1)
 
 
 
 
             elif(SERVER_STATE == SUMMONELECTION):
-                print("Summon election process to find which server can be leader")
-                # TODO: getting stuck here
+                print("%d is now Choosing a new Leader" % (IDnumber))
                 sendingMessage = "$,%s,%s" % (IDnumber, SUMMONELECTION)
                 serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
                 while(SERVER_STATE == SUMMONELECTION):
@@ -282,7 +298,7 @@ def runThread(threadName, sockQueue, serverSocket, socketLock, reservationsLock,
 
 
             elif(SERVER_STATE == ELECTION):
-                print("State swithced to ELECTION")
+                print("%s Calculating Bully election Algorithm to find Next Leader" % IDnumber)
                 global currentLeader
                 global previousPID
                 if(serverQ.qsize() == 1): # No other servers, we're the leader
@@ -298,7 +314,7 @@ def runThread(threadName, sockQueue, serverSocket, socketLock, reservationsLock,
                         else:
                             currentLeader = previousPID
                 # TODO: Now we would have found the leader PID, inform everybody of this
-                print("A Leader was chosen as: %s" % currentLeader)
+                print("%s Chose the new Leader to be: %s" % (IDnumber, currentLeader))
                 sendingMessage = "$,%s,%s" % (currentLeader, ELECTION)
                 serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
                 while(SERVER_STATE == ELECTION):
@@ -400,21 +416,23 @@ def mainFunc(IDnumber, multicastAddress, port):
 
     # Create new threads
     for tName in threadList:
-        thread = myThread(threadID, tName, socketQue, serverSocket, socketLock, serverQLock, reservationsLock, multicastAddress, port, IDnumber)
+        thread = myThread(threadID, tName, socketQue, serverSocket, socketLock, reservationsLock, multicastAddress, port, IDnumber)
         thread.start()
         threads.append(thread)
         threadID += 1
 
     while not flagToExit:
         # Receive the client packet along with the address it is coming from
-        print("Waiting to receive")
+        # print("Waiting to receive")
         try:
             message, address = serverSocket.recvfrom(1024)
-            print("Received %s bytes from %s" % (len(message), address))
+            # print("Received %s bytes from %s" % (len(message), address))
             messageString = message.decode("utf-8")
             serverMessage = str(messageString).split(',')
 
             if(serverMessage[0] == '$'):
+
+
                 if(serverMessage[2] == SUMMONELECTION):  # This means our message is informing that someone is summoning an election
                     if(SERVER_STATE == SUMMONELECTION):  # This means we summoned the election, we should get all of the PID's and go to Bully algorithm stage
                         serverQ.put(serverMessage[1])
@@ -427,13 +445,12 @@ def mainFunc(IDnumber, multicastAddress, port):
                                 messageReceivedString = messageReceivedString.split(',')
                                 print("Received Ballot from %s" % messageReceivedString[1])
                                 serverQ.put(messageReceivedString[1])
-
                             except:
                                 countdown = countdown - 1
                         SERVER_STATE = ELECTION # Now after getting everyone's PID's go and conduct the election to find new Leader
-
                     else: # Somebody else summoned the election
                         SERVER_STATE = VOTE
+
 
 
                 elif(serverMessage[2] == ELECTION): # This means results of an election are in
@@ -442,15 +459,28 @@ def mainFunc(IDnumber, multicastAddress, port):
                     else:
                         SERVER_STATE = FOLLOWING
 
+
+
                 elif(serverMessage[2] == FOLLOWING): # Got a heartbeat message
                     if(SERVER_STATE == LEADING): # Only the leader should care about a receiving heartbeat
                         serverQLock.acquire(1)
                         serverQ.put(serverMessage[1])
                         serverQLock.release()
+
+
+                elif(serverMessage[2] == LEADING): # Got a heartbeat response message
+                    if(SERVER_STATE == FOLLOWING): # only the followers should care about getting a response to one of their heartbeats
+                        if(serverMessage[1] == IDnumber): # only the follower with the matching IDnumber should care about this specific response
+                            serverQLock.acquire(1)
+                            serverQ.put(serverMessage[1])
+                            serverQ.release()
+
             else:
                 socketQue.put((message, address))
         except:
-            print("Main receive Timeout")
+            if(SERVER_STATE == FOLLOWING):
+                print("Group Leader did not respond, %s is summoning an election to find a new leader" % IDnumber)
+                SERVER_STATE = SUMMONELECTION
             pass
     
 
