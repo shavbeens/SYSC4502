@@ -11,6 +11,21 @@ import time
 import threading
 import queue
 import struct
+import os
+import multiprocessing
+
+# Constants for server state
+LEADING = 'lead'
+FOLLOWING = 'follow'
+SUMMONELECTION = 'summonElection'
+ELECTION = 'election'
+VOTE = 'vote'
+
+SERVER_STATE = SUMMONELECTION
+
+
+serverQ = queue.Queue(10)
+serverQLock = threading.Lock() # Lock for the PID's of servers
 
 # Global Variable to exit
 flagToExit = 0
@@ -160,7 +175,7 @@ def quitapp():
 
 
 # Chooses which function to go for given the command that was given by the client
-def sortmessage(messagearray):
+def sortmessage(reservationsLock, messagearray):
     # Default failsafe, if anything doesn't work right, default will ask the client to try again
     retrunmessage = "Something has gone wrong, Try again"
 
@@ -208,100 +223,262 @@ print_lock = threading.Lock()
 
 # Thread class initiation
 class myThread(threading.Thread):
-    def __init__(self, threadID, name, sockQueue):
+    def __init__(self, threadID, name, sockQueue, serverSocket, socketLock, reservationsLock, multicastAddress, port, IDnumber):
         threading.Thread.__init__(self)
         self.ThreadID = threadID
         self.name = name
         self.sockQueue = sockQueue
+        self.serverSocket = serverSocket
+        self.socketLock = socketLock
+        self.reservationsLock = reservationsLock
+        self.multicastAddress = multicastAddress
+        self.port = port
+        self.IDnumber = IDnumber
 
     def run(self):
         print("Starting " + self.name)
-        runThread(self.name, self.sockQueue)
+        runThread(self.name, self.sockQueue, self.serverSocket, self.socketLock, self.reservationsLock, self.multicastAddress, self.port, self.IDnumber)
         print("Exiting " + self.name)
 
 # Thread Runnable
-def runThread(threadName, sockQueue):
-    
+def runThread(threadName, sockQueue, serverSocket, socketLock, reservationsLock, multicastAddress, port, IDnumber):
+
     while not flagToExit:
-        socketLock.acquire(1)
-        if not sockQueue.empty():
-            data = sockQueue.get()
-            socketLock.release()
-            packetMessage = data[0].decode("utf-8")
-            returnAddress = data[1]
-            # Split the message according to ',' and store in List
-            splitmessage = str(packetMessage).split(',')
-            # Remove any accidental white spaces
-            splitmessage = [x.strip(' ') for x in splitmessage]
-            # Print to console just so we can see if the correct message was received
-            print("\n\n%s got the data: %s" % (threadName, splitmessage)) 
-            # Call sortmessage function which will take the list, and return a correct message for the commands
-            sleepTime = random.randint(5,10)
-            print("%s will sleep for %s random seconds" % (threadName, sleepTime))
-            time.sleep(sleepTime)
-            returnarray = str(sortmessage(splitmessage))
-            # Respond to the client with the correct message
-            serverSocket.sendto(returnarray.encode(), returnAddress)
-            print("%s sent the response to Client" % (threadName))
-            time.sleep(sleepTime)
+
+        if(threadName == "ServerCommunicationThread"):
+            if(SERVER_STATE == LEADING):
+                while SERVER_STATE == LEADING:
+                    serverQLock.acquire(1)
+                    if(not serverQ.empty()):
+                        print("got a heartbeat")
+                        follower = serverQ.get()
+                        sendingMessage = "$,%s,%s" % (follower, LEADING)
+                        serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
+                        
+                    else:
+                        serverQLock.release()
+                        print("waiting for heartbeat")
+                        time.sleep(1)
+
             
+
+            elif(SERVER_STATE == FOLLOWING):
+                while SERVER_STATE == FOLLOWING:
+                    sendingMessage = "$,%s,%s" % (IDnumber, FOLLOWING)
+                    serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
+
+
+
+
+            elif(SERVER_STATE == SUMMONELECTION):
+                print("Summon election process to find which server can be leader")
+                # TODO: getting stuck here
+                sendingMessage = "$,%s,%s" % (IDnumber, SUMMONELECTION)
+                serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
+                while(SERVER_STATE == SUMMONELECTION):
+                    time.sleep(0.1)
+
+
+
+
+            elif(SERVER_STATE == ELECTION):
+                print("State swithced to ELECTION")
+                global currentLeader
+                global previousPID
+                if(serverQ.qsize() == 1): # No other servers, we're the leader
+                    currentLeader = serverQ.get()
+                else:
+                    currentLeader = ''
+                    previousPID = serverQ.get()
+                    while not serverQ.empty():
+                        currentPID = serverQ.get()
+                        if(int(currentPID) > int(previousPID)):
+                            currentLeader = currentPID
+                            previousPID = currentPID
+                        else:
+                            currentLeader = previousPID
+                # TODO: Now we would have found the leader PID, inform everybody of this
+                print("A Leader was chosen as: %s" % currentLeader)
+                sendingMessage = "$,%s,%s" % (currentLeader, ELECTION)
+                serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
+                while(SERVER_STATE == ELECTION):
+                    time.sleep(0.1)
+
+            elif(SERVER_STATE == VOTE):
+                sendingMessage = "$,%s,%s" % (IDnumber, VOTE)
+                serverSocket.sendto(sendingMessage.encode(), (multicastAddress, int(port)))
+                while(SERVER_STATE == VOTE):
+                    time.sleep(0.1)
+
+            # Receive the client packet along with the address it is coming from
+            # print("Waiting to receive")
+            # message, address = serverSocket.recvfrom(1024)
+            # print("Received %s bytes from %s. Message is %s" % (len(message), address, message.decode("utf-8")))
+            # socketLock.acquire(1)
+            # sockQueue.put((message, address))
+            # socketLock.release()
+
         else:
-            socketLock.release()
-            time.sleep(1)
+            if(SERVER_STATE == LEADING):
+                socketLock.acquire(1)
+                if not sockQueue.empty():
+                    data = sockQueue.get()
+                    socketLock.release()
+                    packetMessage = data[0].decode("utf-8")
+                    returnAddress = data[1]
+                    # Split the message according to ',' and store in List
+                    splitmessage = str(packetMessage).split(',')
+                    # Remove any accidental white spaces
+                    splitmessage = [x.strip(' ') for x in splitmessage]
+                    # Print to console just so we can see if the correct message was received
+                    print("\n\n%s got the data: %s" % (threadName, splitmessage)) 
+                    # Call sortmessage function which will take the list, and return a correct message for the commands
+                    sleepTime = random.randint(5,10)
+                    print("%s will sleep for %s random seconds" % (threadName, sleepTime))
+                    time.sleep(sleepTime)
+                    returnarray = str(reservationsLock, sortmessage(splitmessage))
+                    # Respond to the client with the correct message
+                    serverSocket.sendto(returnarray.encode(), returnAddress)
+                    print("%s sent the response to Client" % (threadName))
+                    time.sleep(sleepTime)
+                    
+                else:
+                    socketLock.release()
+                    time.sleep(1)
+                
+            elif(SERVER_STATE == FOLLOWING):
+                socketLock.acquire(1)
+                if not sockQueue.empty():
+                    data = sockQueue.get()
+                    socketLock.release()
+                    packetMessage = data[0].decode("utf-8")
+                    returnAddress = data[1]
+                    # Split the message according to ',' and store in List
+                    splitmessage = str(packetMessage).split(',')
+                    # Remove any accidental white spaces
+                    splitmessage = [x.strip(' ') for x in splitmessage]
+                    # Print to console just so we can see if the correct message was received
+                    print("\n\n%s got the data: %s" % (threadName, splitmessage)) 
+                    # Call sortmessage function which will take the list, and return a correct message for the commands
+                    sleepTime = random.randint(5,10)
+                    print("%s will sleep for %s random seconds" % (threadName, sleepTime))
+                    time.sleep(sleepTime)
+                    returnarray = str(reservationsLock, sortmessage(splitmessage))
+                    # Send treturn array string to the leader 
+
     
 
+def mainFunc(IDnumber, multicastAddress, port):
+    global SERVER_STATE
+    # If IDnumber parameter is not passed, then PID is IDnumber
+    if IDnumber == "":
+        IDnumber = os.getpid()
+
+    # Create a UDP socket
+    serverSocket = socket(AF_INET, SOCK_DGRAM)
+    serverSocket.settimeout(1)
+
+    # Assign IP address and port number to socket
+    serverSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    serverSocket.bind(('', int(port)))
+
+    # Add socket to multicast group
+    group = inet_aton(multicastAddress)
+    mreq = struct.pack('4sL', group, INADDR_ANY)
+    serverSocket.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq)
+
+    socketLock = threading.Lock() # lock for socketQueue 
+    reservationsLock = threading.Lock() # Lock for reservations.txt
+
+    
+    # Initiate the threading process
+    threadList = ["ClientCommunicationThread-1", "ClientCommunicationThread-2", "ServerCommunicationThread"]
+    
+    socketQue = queue.Queue(10)
+    threads = []
+    threadID = 1
+
+    # Create new threads
+    for tName in threadList:
+        thread = myThread(threadID, tName, socketQue, serverSocket, socketLock, serverQLock, reservationsLock, multicastAddress, port, IDnumber)
+        thread.start()
+        threads.append(thread)
+        threadID += 1
+
+    while not flagToExit:
+        # Receive the client packet along with the address it is coming from
+        print("Waiting to receive")
+        try:
+            message, address = serverSocket.recvfrom(1024)
+            print("Received %s bytes from %s" % (len(message), address))
+            messageString = message.decode("utf-8")
+            serverMessage = str(messageString).split(',')
+
+            if(serverMessage[0] == '$'):
+                if(serverMessage[2] == SUMMONELECTION):  # This means our message is informing that someone is summoning an election
+                    if(SERVER_STATE == SUMMONELECTION):  # This means we summoned the election, we should get all of the PID's and go to Bully algorithm stage
+                        serverQ.put(serverMessage[1])
+                        # TODO: This counting down has to be dynamic
+                        countdown = 3
+                        while countdown > 0:
+                            try:
+                                messageReceived = serverSocket.recvfrom(1024)
+                                messageReceivedString = messageReceived[0].decode("utf-8")
+                                messageReceivedString = messageReceivedString.split(',')
+                                print("Received Ballot from %s" % messageReceivedString[1])
+                                serverQ.put(messageReceivedString[1])
+
+                            except:
+                                countdown = countdown - 1
+                        SERVER_STATE = ELECTION # Now after getting everyone's PID's go and conduct the election to find new Leader
+
+                    else: # Somebody else summoned the election
+                        SERVER_STATE = VOTE
 
 
-# Get Port number from Parameter
-argv = sys.argv
-if len(argv) != 3:
-    print("Incorrect number of command-line arguments")
-    print("Invoke server with: python", argv[0], "<host> <port>")
-    exit()
+                elif(serverMessage[2] == ELECTION): # This means results of an election are in
+                    if(serverMessage[1] == str(IDnumber)): # we are the leader
+                        SERVER_STATE = LEADING
+                    else:
+                        SERVER_STATE = FOLLOWING
 
-port = sys.argv[2]
-multicastAddress = sys.argv[1]
+                elif(serverMessage[2] == FOLLOWING): # Got a heartbeat message
+                    if(SERVER_STATE == LEADING): # Only the leader should care about a receiving heartbeat
+                        serverQLock.acquire(1)
+                        serverQ.put(serverMessage[1])
+                        serverQLock.release()
+            else:
+                socketQue.put((message, address))
+        except:
+            print("Main receive Timeout")
+            pass
+    
 
-# Create a UDP socket
-serverSocket = socket(AF_INET, SOCK_DGRAM)
-
-# Assign IP address and port number to socket
-serverSocket.bind(('', int(port)))
-
-# Add socket to multicast group
-group = inet_aton(multicastAddress)
-mreq = struct.pack('4sL', group, INADDR_ANY)
-serverSocket.setsockopt(IPPROTO_IP, IP_ADD_MEMBERSHIP, mreq)
-
-
-# Initiate the threading process
-threadList = ["ServerThread-1", "ServerThread-2", "ServerThread-3", "ServerThread-4", "ServerThread-5"]
-socketLock = threading.Lock() # lock for socketQueue 
-reservationsLock = threading.Lock() # Lock for reservations.txt
-
-socketQue = queue.Queue(10)
-threads = []
-threadID = 1
+    for t in threads:
+        t.join()
 
 
-# Create new threads
-for tName in threadList:
-    thread = myThread(threadID, tName, socketQue)
-    thread.start()
-    threads.append(thread)
-    threadID += 1
+if __name__ == '__main__':
 
-# Fill the Queue
-while not flagToExit:
-    # Receive the client packet along with the address it is coming from
-    print("Waiting to receive")
-    message, address = serverSocket.recvfrom(1024)
-    print("Received %s bytes from %s" % (len(message), address))
-    socketLock.acquire(1)
-    socketQue.put((message, address))
-    socketLock.release()
+    # Get Port number from Parameter
+    argv = sys.argv
+    if len(argv) > 4 or len(argv) < 3:
+        print("Incorrect number of command-line arguments")
+        print("Invoke server with: python", argv[0], "<host> <port> <processorID#>")
+        exit()
 
-for t in threads:
-    t.join()
+    # Assign arguments to following variables
+    multicastAddress = sys.argv[1]
+    port = sys.argv[2]
+    processID = ""
+    if(len(argv) == 4):
+        processID = sys.argv[3]
 
-print("Exiting Main Thread")
+    # Starts the process
+    process = multiprocessing.Process(target=mainFunc, args=[processID, multicastAddress, port])
+    print("starting Process %s" % processID)
+    process.start()
+
+    process.join()
+
+    print("Exiting Main Thread")
